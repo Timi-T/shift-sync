@@ -1,0 +1,77 @@
+version: "3.9"
+
+# =============================================================================
+# ShiftSync — Local development infrastructure
+#
+# Provides PostgreSQL and Redis so anyone with Docker can run the project
+# without installing those services manually.
+#
+# Usage:
+#   docker compose up -d          # start in background
+#   docker compose down           # stop (data preserved in named volumes)
+#   docker compose down -v        # stop AND wipe all data
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: shiftsync_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shiftsync
+      POSTGRES_PASSWORD: shiftsync_dev
+      POSTGRES_DB: shift_sync
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shiftsync -d shift_sync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 (used for distributed assignment locking)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: shiftsync_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Redis Commander — browser-based Redis GUI (dev only, optional)
+  # Access at http://localhost:8081
+  # ---------------------------------------------------------------------------
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: shiftsync_redis_ui
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: "local:redis:6379"
+    ports:
+      - "8081:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - tools   # only starts with: docker compose --profile tools up -d
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local

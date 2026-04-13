@@ -1,0 +1,453 @@
+// =============================================================================
+// ShiftSync — Prisma Schema
+// =============================================================================
+// Conventions:
+//   - All DateTime fields are stored in UTC.
+//   - Times are converted to the relevant location's IANA timezone at the
+//     application layer — never at the database layer.
+//   - cuid() for all PKs: URL-safe, globally unique, time-sortable.
+//   - No soft-deletes. Historical integrity is maintained via AuditLog.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+}
+
+// =============================================================================
+// Enums
+// =============================================================================
+
+enum Role {
+  ADMIN
+  MANAGER
+  STAFF
+}
+
+enum ShiftStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+}
+
+enum AssignmentStatus {
+  CONFIRMED
+  PENDING_SWAP
+  CANCELLED
+}
+
+enum AvailabilityType {
+  /// Repeats weekly on a specific day. Bounded by effectiveFrom / effectiveTo.
+  RECURRING
+  /// One-off override for a specific calendar date.
+  EXCEPTION
+}
+
+enum SwapType {
+  SWAP
+  DROP
+}
+
+enum PickupStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SwapStatus {
+  PENDING_ACCEPTANCE
+  PENDING_MANAGER
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXPIRED
+}
+
+enum NotificationType {
+  SHIFT_ASSIGNED
+  SHIFT_CHANGED
+  SHIFT_PUBLISHED
+  SHIFT_CANCELLED
+  SWAP_REQUESTED
+  SWAP_ACCEPTED
+  SWAP_REJECTED
+  SWAP_APPROVED
+  SWAP_CANCELLED
+  DROP_AVAILABLE
+  DROP_CLAIMED
+  DROP_EXPIRED
+  OVERTIME_WARNING
+  AVAILABILITY_CHANGED
+  SCHEDULE_PUBLISHED
+  MANAGER_OVERRIDE_REQUIRED
+}
+
+// =============================================================================
+// Users
+// =============================================================================
+
+model User {
+  id           String @id @default(cuid())
+  email        String @unique
+  name         String
+  passwordHash String
+  role         Role   @default(STAFF)
+
+  /// Target hours per week — used in fairness analytics.
+  /// Null = no preference stated.
+  desiredHoursPerWeek Int?
+
+  skills                 UserSkill[]
+  locationCertifications LocationCertification[]
+  availability           AvailabilityWindow[]
+  assignments            ShiftAssignment[]
+  managedLocations       LocationManager[]
+  notificationPreference NotificationPreference?
+  notifications          Notification[]
+  auditLogsPerformed     AuditLog[]
+  swapRequestsInitiated  SwapRequest[]           @relation("SwapInitiator")
+  swapRequestsReceived   SwapRequest[]           @relation("SwapReceiver")
+  pickupRequests         ShiftPickupRequest[]
+  managerOverridesFor    ManagerOverride[]       @relation("OverrideForUser")
+  managerOverridesGranted ManagerOverride[]      @relation("OverrideGrantedBy")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([role])
+}
+
+// =============================================================================
+// Locations
+// =============================================================================
+
+model Location {
+  id       String @id @default(cuid())
+  name     String
+  /// IANA timezone identifier — e.g. "America/Los_Angeles", "America/New_York".
+  timezone String
+  address  String
+
+  managers       LocationManager[]
+  certifications LocationCertification[]
+  shifts         Shift[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Which managers are responsible for which locations.
+model LocationManager {
+  userId     String
+  locationId String
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, locationId])
+}
+
+/// Which staff are certified to work at a location.
+/// Revocation does NOT retroactively invalidate past assignments. See DECISIONS.md.
+model LocationCertification {
+  userId     String
+  locationId String
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  certifiedAt DateTime @default(now())
+  /// User.id of the admin/manager who granted the certification.
+  certifiedBy String
+
+  @@id([userId, locationId])
+}
+
+// =============================================================================
+// Skills
+// =============================================================================
+
+model Skill {
+  id   String @id @default(cuid())
+  name String @unique
+
+  users  UserSkill[]
+  shifts Shift[]
+}
+
+model UserSkill {
+  userId  String
+  skillId String
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([userId, skillId])
+}
+
+// =============================================================================
+// Availability
+// =============================================================================
+
+model AvailabilityWindow {
+  id     String @id @default(cuid())
+  userId String
+
+  type AvailabilityType
+
+  /// For RECURRING: 0 = Sunday … 6 = Saturday. Null for EXCEPTION.
+  dayOfWeek Int?
+
+  /// Local wall-clock start time "HH:MM" (24h).
+  /// Interpreted against the shift's location timezone — we store user intent
+  /// and resolve DST at query time (see DECISIONS.md).
+  startTime String
+
+  /// Local wall-clock end time "HH:MM". "00:00" means midnight (end-of-day).
+  endTime String
+
+  /// For EXCEPTION: the specific date (stored as UTC midnight). Null for RECURRING.
+  date DateTime?
+
+  /// For EXCEPTION: false means the staff member is explicitly UNAVAILABLE.
+  available Boolean @default(true)
+
+  /// Optional date range bounding when a RECURRING window is active.
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, type])
+  @@index([userId, dayOfWeek])
+}
+
+// =============================================================================
+// Shifts & Assignments
+// =============================================================================
+
+model Shift {
+  id         String @id @default(cuid())
+  locationId String
+  skillId    String
+
+  /// UTC. May be earlier than endTime's calendar day for overnight shifts.
+  startTime DateTime
+
+  /// UTC. Overnight shifts end on a later calendar day.
+  endTime DateTime
+
+  headcount Int @default(1)
+
+  status      ShiftStatus @default(DRAFT)
+  publishedAt DateTime?
+
+  /// Friday or Saturday evening — tagged at creation time.
+  isPremium Boolean @default(false)
+
+  /// User.id of the manager who created this shift.
+  createdBy String
+
+  location       Location             @relation(fields: [locationId], references: [id])
+  skill          Skill                @relation(fields: [skillId], references: [id])
+  assignments    ShiftAssignment[]
+  swapRequests   SwapRequest[]
+  pickupRequests ShiftPickupRequest[]
+  auditLogs      AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([locationId, startTime])
+  @@index([startTime, endTime])
+  @@index([status, locationId])
+}
+
+model ShiftAssignment {
+  id      String @id @default(cuid())
+  shiftId String
+  userId  String
+
+  status AssignmentStatus @default(CONFIRMED)
+
+  /// User.id of the manager who made this assignment.
+  assignedBy String
+
+  shift Shift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  swapRequests SwapRequest[]
+
+  assignedAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([shiftId, userId])
+  @@index([userId])
+  @@index([shiftId])
+}
+
+/// Staff-initiated request to be assigned to an open published shift.
+/// Requires manager approval before the assignment is created.
+model ShiftPickupRequest {
+  id      String       @id @default(cuid())
+  shiftId String
+  userId  String
+  status  PickupStatus @default(PENDING)
+
+  /// Optional note from the manager when approving or rejecting.
+  managerNote String?
+  resolvedBy  String?
+
+  shift Shift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shiftId, userId])
+  @@index([shiftId, status])
+  @@index([userId, status])
+}
+
+// =============================================================================
+// Swap & Drop Requests
+// =============================================================================
+
+model SwapRequest {
+  id String @id @default(cuid())
+
+  type SwapType
+
+  /// The assignment the initiator wants to relinquish.
+  assignmentId String
+
+  initiatorId String
+
+  /// SWAP only: the specific staff member the initiator wants to trade with.
+  receiverId String?
+
+  status SwapStatus @default(PENDING_ACCEPTANCE)
+
+  managerNote String?
+  /// User.id of the manager who approved or rejected.
+  approvedBy  String?
+
+  /// DROP requests expire this many hours before the shift starts.
+  expiresAt DateTime?
+
+  assignment ShiftAssignment  @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  initiator  User             @relation("SwapInitiator", fields: [initiatorId], references: [id])
+  receiver   User?            @relation("SwapReceiver", fields: [receiverId], references: [id])
+  shift      Shift            @relation(fields: [shiftId], references: [id])
+
+  /// Denormalized from assignment.shiftId for efficient querying.
+  shiftId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([initiatorId, status])
+  @@index([receiverId, status])
+  @@index([shiftId])
+  @@index([status, expiresAt])
+}
+
+// =============================================================================
+// Notifications
+// =============================================================================
+
+model Notification {
+  id     String @id @default(cuid())
+  userId String
+
+  type    NotificationType
+  title   String
+  message String
+
+  /// Arbitrary JSON for deep-linking (e.g. { shiftId, swapRequestId }).
+  data Json?
+
+  read   Boolean   @default(false)
+  readAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
+
+model NotificationPreference {
+  userId String @id
+
+  inApp Boolean @default(true)
+  email Boolean @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// =============================================================================
+// Audit & Overrides
+// =============================================================================
+
+model AuditLog {
+  id String @id @default(cuid())
+
+  /// Entity type — "Shift", "ShiftAssignment", "SwapRequest", "Location", "User"
+  entityType String
+  entityId   String
+
+  /// Human-readable action — "created", "published", "assigned", "approved", etc.
+  action String
+
+  /// JSON snapshot before the change. Null for create events.
+  before Json?
+  /// JSON snapshot after the change.
+  after  Json?
+
+  /// User.id who triggered this change.
+  performedBy String
+
+  /// Optional FK to Shift for fast shift-history queries.
+  shiftId    String?
+  locationId String?
+
+  performer User   @relation(fields: [performedBy], references: [id])
+  shift     Shift? @relation(fields: [shiftId], references: [id])
+
+  performedAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([shiftId])
+  @@index([locationId, performedAt])
+}
+
+/// Recorded when a manager overrides a hard labor-law block (7th consecutive day).
+model ManagerOverride {
+  id String @id @default(cuid())
+
+  /// Override type — "SEVENTH_CONSECUTIVE_DAY"
+  type   String
+  reason String
+
+  shiftId String
+  userId  String
+
+  grantedBy String
+  grantedAt DateTime @default(now())
+
+  forUser   User @relation("OverrideForUser", fields: [userId], references: [id])
+  grantedByUser User @relation("OverrideGrantedBy", fields: [grantedBy], references: [id])
+
+  @@index([userId])
+  @@index([shiftId])
+}

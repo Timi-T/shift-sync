@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+.next/
+out/
+build/
+
+# Environment — NEVER commit secrets
+.env
+.env.local
+.env.*.local
+
+# Test & Coverage
+coverage/
+.vitest-cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+.vscode/settings.json
+*.pem
+Thumbs.db
+
+# Vercel / Railway
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Prisma generated
+# (keep schema.prisma in git; generated client is re-built on deploy)
+apps/api/node_modules/.prisma/

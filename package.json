@@ -1,0 +1,33 @@
+{
+  "name": "shift-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-location staff scheduling platform for Coastal Eats restaurant group",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run build --workspace=@shift-sync/shared && concurrently \"npm run dev --workspace=@shift-sync/shared\" \"npm run dev --workspace=@shift-sync/api\" \"npm run dev --workspace=@shift-sync/web\"",
+    "build": "npm run build --workspace=@shift-sync/shared && npm run build --workspace=@shift-sync/api && npm run build --workspace=@shift-sync/web",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md}\" --ignore-path .gitignore",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:unit": "npm run test:unit --workspace=@shift-sync/api",
+    "test:integration": "npm run test:integration --workspace=@shift-sync/api",
+    "test:components": "npm run test:components --workspace=@shift-sync/web",
+    "db:generate": "npm run db:generate --workspace=@shift-sync/api",
+    "db:migrate": "npm run db:migrate --workspace=@shift-sync/api",
+    "db:seed": "npm run db:seed --workspace=@shift-sync/api",
+    "db:reset": "npm run db:reset --workspace=@shift-sync/api",
+    "db:studio": "npm run db:studio --workspace=@shift-sync/api"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "concurrently": "^9.1.0",
+    "prettier": "^3.4.2",
+    "prettier-plugin-tailwindcss": "^0.6.9",
+    "typescript": "^5.7.2"
+  }
+}
